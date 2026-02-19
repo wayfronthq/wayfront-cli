@@ -2,40 +2,102 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-const configDir = join(homedir(), '.config', 'wayfront');
-const configPath = join(configDir, 'config.json');
+function getDefaultConfigDir() {
+  return join(homedir(), '.config', 'wayfront');
+}
+
+export function getConfigDir() {
+  return process.env.WAYFRONT_CLI_CONFIG_DIR || getDefaultConfigDir();
+}
+
+export function getConfigPath() {
+  return join(getConfigDir(), 'config.json');
+}
+
+export function normalizeConfig(config = {}) {
+  const normalized = {
+    default: config.default || null,
+    workspaces: { ...(config.workspaces || {}) },
+  };
+
+  for (const [workspace, value] of Object.entries(normalized.workspaces)) {
+    if (!value || typeof value !== 'object') {
+      normalized.workspaces[workspace] = {};
+      continue;
+    }
+
+    if (!value.auth && value.token) {
+      normalized.workspaces[workspace] = {
+        ...value,
+        auth: {
+          type: 'token',
+          token: value.token,
+        },
+      };
+      delete normalized.workspaces[workspace].token;
+      continue;
+    }
+
+    normalized.workspaces[workspace] = {
+      ...value,
+      auth: value.auth || null,
+    };
+  }
+
+  return normalized;
+}
 
 export function loadConfig() {
   try {
-    return JSON.parse(readFileSync(configPath, 'utf8'));
+    return normalizeConfig(JSON.parse(readFileSync(getConfigPath(), 'utf8')));
   } catch {
-    return { default: null, workspaces: {} };
+    return normalizeConfig();
   }
 }
 
 export function saveConfig(config) {
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  mkdirSync(getConfigDir(), { recursive: true });
+  writeFileSync(getConfigPath(), JSON.stringify(normalizeConfig(config), null, 2) + '\n');
 }
 
-export function getCredentials() {
-  const config = loadConfig();
+export function getWorkspaceConfig(config = loadConfig(), workspaceName = null) {
+  const workspace = workspaceName || config.default;
 
-  if (!config.default) {
-    throw new Error('No active workspace. Run: wayfront init <workspace>');
+  if (!workspace) {
+    throw new Error('No active workspace. Run: wayfront auth login <workspace>');
   }
 
-  const ws = config.workspaces[config.default];
+  const ws = config.workspaces?.[workspace];
   if (!ws) {
-    throw new Error(`Workspace "${config.default}" not found. Run: wayfront init <workspace>`);
-  }
-  if (!ws.token) {
-    throw new Error(`No token set for workspace "${config.default}". Run: wayfront init ${config.default}`);
+    throw new Error(`Workspace "${workspace}" not found. Run: wayfront auth login ${workspace}`);
   }
 
   return {
-    workspace: config.default,
-    url: ws.url || `https://${config.default}.wayfront.com`,
-    token: ws.token,
+    workspace,
+    url: ws.url || `https://${workspace}.wayfront.com`,
+    auth: ws.auth,
+    ...ws,
   };
+}
+
+export function getApiBasePath(workspaceConfig) {
+  return workspaceConfig?.auth?.type === 'oauth' ? '/oauth-api' : '/api';
+}
+
+export function getCredentials() {
+  const workspaceConfig = getWorkspaceConfig();
+
+  if (!workspaceConfig.auth) {
+    throw new Error(`No auth configured for workspace "${workspaceConfig.workspace}". Run: wayfront auth login ${workspaceConfig.workspace}`);
+  }
+
+  if (workspaceConfig.auth.type === 'token' && !workspaceConfig.auth.token) {
+    throw new Error(`No token set for workspace "${workspaceConfig.workspace}". Run: wayfront auth login ${workspaceConfig.workspace}`);
+  }
+
+  if (workspaceConfig.auth.type === 'oauth' && !workspaceConfig.auth.accessToken) {
+    throw new Error(`No OAuth session for workspace "${workspaceConfig.workspace}". Run: wayfront auth login ${workspaceConfig.workspace}`);
+  }
+
+  return workspaceConfig;
 }
