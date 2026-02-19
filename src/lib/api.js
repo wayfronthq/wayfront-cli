@@ -23,6 +23,13 @@ export function isLocal(url) {
     || hostname.endsWith('.local');
 }
 
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function request(method, path, body) {
   const { url: baseUrl, token } = getCredentials();
   const url = `${baseUrl}${path}`;
@@ -65,23 +72,23 @@ async function request(method, path, body) {
     try {
       data = await res.json();
     } catch {
-      throw new Error(`API error ${res.status}: ${res.statusText}`);
+      throw new ApiError(`API error ${res.status}: ${res.statusText}`, res.status);
     }
 
     if (res.status === 401) {
-      throw new Error('Authentication failed. Check your API token.');
+      throw new ApiError('Authentication failed. Check your API token.', 401);
     }
     if (res.status === 403) {
-      throw new Error(data.message || 'Forbidden. Your license may not include API access.');
+      throw new ApiError(data.message || 'Forbidden. Your license may not include API access.', 403);
     }
     if (res.status === 422 && data.errors) {
       const msgs = Object.entries(data.errors)
         .map(([field, errs]) => `  ${field}: ${errs.join(', ')}`)
         .join('\n');
-      throw new Error(`Validation failed:\n${msgs}`);
+      throw new ApiError(`Validation failed:\n${msgs}`, 422);
     }
 
-    throw new Error(data.message || `API error ${res.status}`);
+    throw new ApiError(data.message || `API error ${res.status}`, res.status);
   }
 
   if (res.status === 204) return null;
@@ -91,6 +98,10 @@ async function request(method, path, body) {
 
 export function apiGet(path) {
   return request('GET', path);
+}
+
+export function apiPost(path, body) {
+  return request('POST', path, body);
 }
 
 export function apiPut(path, body) {

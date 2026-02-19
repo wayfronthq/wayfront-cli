@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import chalk from 'chalk';
 import ora from 'ora';
-import { apiGet, apiPut } from '../lib/api.js';
+import { apiGet, apiPost, apiPut, ApiError } from '../lib/api.js';
 import { nameToPath, pathToName, findTemplateFiles, formatName, elapsed } from '../lib/files.js';
 
 export function registerTemplatesPush(program) {
@@ -25,7 +25,16 @@ export function registerTemplatesPush(program) {
             process.exit(1);
           }
 
-          await apiPut(`/api/templates/${name}`, { data: content });
+          // Try updating first; if it doesn't exist yet, create it
+          try {
+            await apiPut(`/api/templates/${name}`, { data: content });
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 404) {
+              await apiPost('/api/templates', { name, data: content });
+            } else {
+              throw err;
+            }
+          }
           spinner.succeed(`Pushed ${name} ${elapsed(start)}`);
         } else {
           const files = findTemplateFiles(dir);
@@ -45,13 +54,14 @@ export function registerTemplatesPush(program) {
             remoteByName[t.name] = t.data || '';
           }
 
-          // Find changed templates
+          // Find changed and new templates
           const changed = [];
           for (const filePath of files) {
             const templateName = pathToName(filePath, dir);
             const local = readFileSync(filePath, 'utf8');
-            if (local !== remoteByName[templateName]) {
-              changed.push({ name: templateName, content: local });
+            const isNew = !(templateName in remoteByName);
+            if (isNew || local !== remoteByName[templateName]) {
+              changed.push({ name: templateName, content: local, isNew });
             }
           }
 
@@ -68,7 +78,11 @@ export function registerTemplatesPush(program) {
 
           for (const t of changed) {
             try {
-              await apiPut(`/api/templates/${t.name}`, { data: t.content });
+              if (t.isNew) {
+                await apiPost('/api/templates', { name: t.name, data: t.content });
+              } else {
+                await apiPut(`/api/templates/${t.name}`, { data: t.content });
+              }
               count++;
             } catch (err) {
               errors.push({ name: t.name, message: err.message });
