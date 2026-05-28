@@ -3,40 +3,40 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { loadConfig } from './lib/config.js';
-import { registerInit, runInit } from './commands/init.js';
-import { registerUse } from './commands/use.js';
-import { registerTemplatesPull } from './commands/templates-pull.js';
-import { registerTemplatesPush } from './commands/templates-push.js';
-import { registerTemplatesReset } from './commands/templates-reset.js';
+import { registerAuth } from './commands/auth.js';
+import { registerWorkspace } from './commands/workspace.js';
+import { registerApi } from './commands/api.js';
+import { registerResources } from './commands/resources.js';
+import { registerTemplates } from './commands/templates.js';
 
 const program = new Command();
 
 program
   .name('wayfront')
-  .description('CLI for managing Wayfront templates')
-  .version('0.1.1')
-  .action(async () => {
+  .description('CLI for the Wayfront API and templates')
+  .version('0.1.2')
+  .action(() => {
     const config = loadConfig();
-    const ws = config.default && config.workspaces?.[config.default];
+    const workspaceName = config.default;
+    const ws = workspaceName && config.workspaces?.[workspaceName];
 
     if (!ws) {
-      console.log(`Welcome to the frontier. Let's connect your Wayfront workspace.\n`);
-      await runInit();
-      console.log();
-    } else {
-      const url = ws.url || `https://${config.default}.wayfront.com`;
-      const greetings = ['Ready', 'All set', 'Connected', 'Good to go'];
-      const greeting = greetings[Math.floor(Math.random() * greetings.length)];
-      console.log(`${chalk.green('✓')} ${greeting} — ${chalk.bold(config.default)} ${chalk.dim(`(${url})`)}\n`);
+      console.log(`No active workspace. Run ${chalk.cyan('wayfront auth login <workspace>')} to connect one.\n`);
+      program.outputHelp();
+      return;
     }
 
+    const url = ws.url || `https://${workspaceName}.wayfront.com`;
+    const greetings = ['Ready', 'All set', 'Connected', 'Good to go'];
+    const greeting = greetings[Math.floor(Math.random() * greetings.length)];
+    console.log(`${chalk.green('✓')} ${greeting} — ${chalk.bold(workspaceName)} ${chalk.dim(`(${url})`)}\n`);
     program.outputHelp();
   });
 
-registerInit(program);
-registerUse(program);
-registerTemplatesPull(program);
-registerTemplatesPush(program);
-registerTemplatesReset(program);
+registerAuth(program);
+registerWorkspace(program);
+registerTemplates(program);
+registerResources(program);
+registerApi(program);
 
 program.parse();

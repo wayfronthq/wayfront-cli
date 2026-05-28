@@ -12,37 +12,33 @@ function writeTemplate(template, dir) {
   return filePath;
 }
 
-export function registerTemplatesPull(program) {
-  program
-    .command('templates:pull [name]')
-    .description('Pull templates from the API (or one by name)')
-    .action(async (name) => {
-      const dir = './templates';
-      const isFirstPull = !existsSync(dir) || !existsSync(`${dir}/.gitignore`);
-      const start = Date.now();
-      const spinner = ora(name ? `Pulling ${name}…` : 'Pulling templates…').start();
+export async function runTemplatesPull(name) {
+  const dir = './templates';
+  const isFirstPull = !existsSync(dir) || !existsSync(`${dir}/.gitignore`);
+  const start = Date.now();
+  const spinner = ora(name ? `Pulling ${name}…` : 'Pulling templates…').start();
 
-      try {
-        if (name) {
-          const template = await apiGet(`/api/templates/${name}`);
-          const filePath = writeTemplate(template, dir);
-          spinner.succeed(`${template.name} → ${filePath} ${elapsed(start)}`);
-        } else {
-          const templates = await apiGet('/api/templates');
+  try {
+    if (name) {
+      const template = await apiGet(`/api/templates/${name}`);
+      const filePath = writeTemplate(template, dir);
+      spinner.succeed(`${template.name} → ${filePath} ${elapsed(start)}`);
+      return;
+    }
 
-          for (const t of templates) {
-            writeTemplate(t, dir);
-          }
+    const templates = await apiGet('/api/templates');
 
-          spinner.succeed(`Pulled ${templates.length} template(s) to ${dir} ${elapsed(start)}`);
+    for (const template of templates) {
+      writeTemplate(template, dir);
+    }
 
-          if (isFirstPull) {
-            console.log(chalk.dim('\n  Edit templates locally, then push changes with: wayfront templates:push'));
-          }
-        }
-      } catch (err) {
-        spinner.fail(err.message);
-        process.exit(1);
-      }
-    });
+    spinner.succeed(`Pulled ${templates.length} template(s) to ${dir} ${elapsed(start)}`);
+
+    if (isFirstPull) {
+      console.log(chalk.dim('\n  Edit templates locally, then push changes with: wayfront templates push'));
+    }
+  } catch (error) {
+    spinner.fail(error.message);
+    process.exit(1);
+  }
 }
