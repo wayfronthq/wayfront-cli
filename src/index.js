@@ -14,7 +14,7 @@ const program = new Command();
 program
   .name('wayfront')
   .description('CLI for the Wayfront API and templates')
-  .version('0.1.2')
+  .version('0.2.0')
   .action(() => {
     const config = loadConfig();
     const workspaceName = config.default;

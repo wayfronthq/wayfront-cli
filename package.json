@@ -1,6 +1,6 @@
 {
   "name": "wayfront",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "CLI for managing Wayfront templates",
   "type": "module",
   "bin": {
