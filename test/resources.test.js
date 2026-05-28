@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RESOURCE_COMMANDS } from '../src/commands/resources.js';
+import { RESOURCE_COMMANDS, normalizeResourceActionArgs } from '../src/commands/resources.js';
 
 describe('resource command definitions', () => {
   it('covers the selected API tags as first-class commands', () => {
@@ -23,5 +23,21 @@ describe('resource command definitions', () => {
     assert.ok(invoices.operations.some((operation) => operation.action === 'mark-paid'));
     assert.ok(tasks.operations.some((operation) => operation.action === 'complete'));
     assert.ok(tasks.operations.some((operation) => operation.action === 'incomplete'));
+  });
+
+  it('normalizes Commander action arguments for variadic params', () => {
+    const options = { json: undefined };
+    const command = { args: ['limit=1'] };
+
+    assert.deepEqual(normalizeResourceActionArgs([
+      'ord_123',
+      ['limit=1', 'expand[]=client'],
+      options,
+      command,
+    ]), {
+      positionalArgs: ['ord_123'],
+      variadic: ['limit=1', 'expand[]=client'],
+      options,
+    });
   });
 });

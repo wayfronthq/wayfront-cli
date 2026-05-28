@@ -9,6 +9,13 @@ import {
 } from '../src/lib/openapi.js';
 
 const specText = `openapi: 3.0.0
+components:
+  parameters:
+    limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
 paths:
   /orders:
     get:
@@ -20,6 +27,7 @@ paths:
           in: query
           schema:
             type: integer
+        - $ref: '#/components/parameters/limit'
   /orders/{order}:
     patch:
       operationId: ordersUpdate
@@ -72,9 +80,36 @@ describe('openapi helpers', () => {
   });
 
   it('parses repeated key value args', () => {
-    assert.deepEqual(parseKeyValueArgs(['template=portal.home', 'page=2']), {
+    assert.deepEqual(parseKeyValueArgs(['template=portal.home', 'page=2', 'expand[]=orders', 'expand[]=tickets']), {
       template: 'portal.home',
       page: '2',
+      'expand[]': ['orders', 'tickets'],
+    });
+  });
+
+  it('resolves referenced query parameters', () => {
+    const spec = parseApiSpec(specText);
+    const operation = getOperation(spec, 'ordersIndex');
+
+    assert.deepEqual(buildOperationRequest(operation, {
+      limit: '1',
+    }), {
+      method: 'GET',
+      path: '/orders?limit=1',
+      body: undefined,
+    });
+  });
+
+  it('passes arbitrary args as query parameters when there is no request body', () => {
+    const spec = parseApiSpec(specText);
+    const operation = getOperation(spec, 'ordersIndex');
+
+    assert.deepEqual(buildOperationRequest(operation, {
+      'filters[id][$in][]': ['1', '2'],
+    }), {
+      method: 'GET',
+      path: '/orders?filters%5Bid%5D%5B%24in%5D%5B%5D=1&filters%5Bid%5D%5B%24in%5D%5B%5D=2',
+      body: undefined,
     });
   });
 

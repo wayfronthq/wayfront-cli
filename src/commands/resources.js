@@ -182,14 +182,25 @@ function commandSignature(operation) {
   return `${operation.action}${positional ? ` ${positional}` : ''} [params...]`;
 }
 
-async function runResourceOperation(definition, rawArgs) {
+export function normalizeResourceActionArgs(rawArgs) {
   const args = [...rawArgs];
-  const options = args.pop();
+  args.pop(); // Commander passes the command instance as the final action argument.
+  const options = args.pop() || {};
   const variadic = Array.isArray(args.at(-1)) ? args.pop() : [];
+
+  return {
+    positionalArgs: args,
+    variadic,
+    options,
+  };
+}
+
+async function runResourceOperation(definition, rawArgs) {
+  const { positionalArgs, variadic, options } = normalizeResourceActionArgs(rawArgs);
   const positional = {};
 
   definition.pathParams.forEach((name, index) => {
-    positional[name] = args[index];
+    positional[name] = positionalArgs[index];
   });
 
   const spec = await getCachedSpec();

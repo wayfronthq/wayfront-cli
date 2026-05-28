@@ -6,6 +6,22 @@ export function parseApiSpec(text) {
   return YAML.parse(text);
 }
 
+function resolveLocalRef(spec, ref) {
+  if (!ref?.startsWith('#/')) return null;
+
+  return ref
+    .slice(2)
+    .split('/')
+    .reduce((value, segment) => value?.[segment.replace(/~1/g, '/').replace(/~0/g, '~')], spec);
+}
+
+function resolveParameter(spec, parameter) {
+  if (!parameter?.$ref) return parameter;
+
+  const resolved = resolveLocalRef(spec, parameter.$ref);
+  return resolved ? { ...resolved } : parameter;
+}
+
 export function listOperations(spec) {
   const operations = [];
 
@@ -20,7 +36,7 @@ export function listOperations(spec) {
         path,
         summary: operation.summary || '',
         tags: operation.tags || [],
-        parameters: operation.parameters || [],
+        parameters: (operation.parameters || []).map((parameter) => resolveParameter(spec, parameter)),
         requestBody: operation.requestBody || null,
       });
     }
@@ -48,16 +64,34 @@ export function parseKeyValueArgs(values = []) {
 
     const key = value.slice(0, separatorIndex);
     const rawValue = value.slice(separatorIndex + 1);
-    args[key] = rawValue;
+    if (args[key] === undefined) {
+      args[key] = rawValue;
+    } else if (Array.isArray(args[key])) {
+      args[key].push(rawValue);
+    } else {
+      args[key] = [args[key], rawValue];
+    }
   }
 
   return args;
+}
+
+function appendQueryValue(query, key, value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      query.append(key, item);
+    }
+    return;
+  }
+
+  query.append(key, value);
 }
 
 export function buildOperationRequest(operation, args, jsonBody = null) {
   const pathParameters = operation.parameters.filter((parameter) => parameter.in === 'path');
   const queryParameters = operation.parameters.filter((parameter) => parameter.in === 'query');
   const queryParameterNames = new Set(queryParameters.map((parameter) => parameter.name));
+  const pathParameterNames = new Set(pathParameters.map((parameter) => parameter.name));
 
   let path = operation.path;
   for (const parameter of pathParameters) {
@@ -70,16 +104,19 @@ export function buildOperationRequest(operation, args, jsonBody = null) {
 
   const query = new URLSearchParams();
   const remaining = {};
+  const usesRequestBody = Boolean(operation.requestBody);
 
   for (const [key, value] of Object.entries(args)) {
-    if (queryParameterNames.has(key)) {
-      query.append(key, value);
+    if (pathParameterNames.has(key)) {
       continue;
     }
 
-    if (!pathParameters.some((parameter) => parameter.name === key)) {
-      remaining[key] = value;
+    if (queryParameterNames.has(key) || !usesRequestBody) {
+      appendQueryValue(query, key, value);
+      continue;
     }
+
+    remaining[key] = value;
   }
 
   const body = jsonBody
