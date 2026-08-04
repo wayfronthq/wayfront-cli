@@ -59,19 +59,34 @@ describe('browserCommandFor', () => {
     }
   });
 
-  it('uses explorer.exe from SystemRoot on windows', () => {
+  it('uses PowerShell Start-Process from SystemRoot on windows', () => {
     process.env.SystemRoot = 'D:\\Windows';
+    const { command, args, env } = browserCommandFor('win32', AUTHORIZATION_URL);
 
-    assert.deepEqual(browserCommandFor('win32', AUTHORIZATION_URL), {
-      command: 'D:\\Windows\\explorer.exe',
-      args: [AUTHORIZATION_URL],
-    });
+    assert.equal(command, 'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    // The URL is passed through the environment, never on the command line, so it
+    // can never be parsed as PowerShell code.
+    assert.ok(args.includes('Start-Process $Env:WAYFRONT_BROWSER_URL'));
+    assert.equal(env.WAYFRONT_BROWSER_URL, AUTHORIZATION_URL);
   });
 
   it('falls back to C:\\Windows when SystemRoot is unset', () => {
     delete process.env.SystemRoot;
 
-    assert.equal(browserCommandFor('win32', AUTHORIZATION_URL).command, 'C:\\Windows\\explorer.exe');
+    assert.equal(
+      browserCommandFor('win32', AUTHORIZATION_URL).command,
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    );
+  });
+
+  it('never places the url in the windows command arguments', () => {
+    // The whole point of the env-var hand-off: a URL containing shell/PowerShell
+    // metacharacters must not appear in any argument.
+    const hostile = "https://acme.wayfront.com/oauth/authorize?a=1&b='; iex(rm x);'&c=%3B";
+    const { args, env } = browserCommandFor('win32', hostile);
+
+    assert.ok(args.every((arg) => !arg.includes('acme.wayfront.com')));
+    assert.equal(env.WAYFRONT_BROWSER_URL, hostile);
   });
 
   it('uses open on macos', () => {
@@ -89,10 +104,10 @@ describe('browserCommandFor', () => {
     assert.equal(browserCommandFor('freebsd', AUTHORIZATION_URL).command, 'xdg-open');
   });
 
-  it('passes the whole url as a single argument on every platform', () => {
-    // The Windows bug was the URL being split at its first `&`, so assert the
-    // query survives intact rather than only that some argument was passed.
-    for (const platform of ['win32', 'darwin', 'linux']) {
+  it('passes the whole url as a single argument on unix platforms', () => {
+    // The Windows bug was the URL being split at its first `&`; on unix the URL is
+    // a single argv element, so assert the query survives intact.
+    for (const platform of ['darwin', 'linux']) {
       const { args } = browserCommandFor(platform, AUTHORIZATION_URL);
 
       assert.equal(args.length, 1);
@@ -102,10 +117,9 @@ describe('browserCommandFor', () => {
     }
   });
 
-  it('keeps shell metacharacters in the url untouched', () => {
+  it('keeps shell metacharacters in the url untouched on unix', () => {
     const hostile = "https://acme.wayfront.com/oauth/authorize?a=1&b='; id;'&c=%3Bwhoami";
 
-    assert.equal(browserCommandFor('win32', hostile).args[0], hostile);
     assert.equal(browserCommandFor('darwin', hostile).args[0], hostile);
     assert.equal(browserCommandFor('linux', hostile).args[0], hostile);
   });

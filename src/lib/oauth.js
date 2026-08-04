@@ -78,20 +78,35 @@ export function validateOAuthMetadata(metadata, issuerOrigin) {
   return metadata;
 }
 
+// Environment variable used to hand the URL to PowerShell's Start-Process without
+// ever placing it on a command line — see browserCommandFor.
+const WIN_BROWSER_URL_ENV = 'WAYFRONT_BROWSER_URL';
+
 /**
- * Builds the argv used to hand a URL to the platform's default browser.
+ * Builds the command used to hand a URL to the platform's default browser, as
+ * `{ command, args, env }` so the caller can spawn it without a shell.
  *
- * Returned as a command plus an argument array so the caller can spawn it without
- * a shell: cmd.exe ignores single quotes and treats `&` as a command separator, so
- * any shell-interpolated form truncates OAuth URLs at their first query parameter.
- * `explorer.exe` is preferred on Windows over `rundll32 url.dll,FileProtocolHandler`
- * because endpoint protection commonly blocks the latter as a LOLBin technique.
+ * No shell is used on any platform: cmd.exe ignores single quotes and treats `&`
+ * as a command separator, so any shell-interpolated form truncates OAuth URLs at
+ * their first query parameter (the original bug).
+ *
+ * Windows uses PowerShell's `Start-Process`, reading the URL from an environment
+ * variable rather than an argument. `explorer.exe <url>` is unreliable — on some
+ * configurations it opens a File Explorer window instead of the browser — and
+ * `rundll32 url.dll,FileProtocolHandler` is commonly blocked by endpoint
+ * protection as a LOLBin technique. Passing the URL through the environment keeps
+ * it out of the PowerShell command text entirely, so it can never be parsed as
+ * code regardless of what characters it contains.
  */
 export function browserCommandFor(platform, url) {
   if (platform === 'win32') {
     return {
-      command: win32Path.join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'),
-      args: [url],
+      command: win32Path.join(
+        process.env.SystemRoot || 'C:\\Windows',
+        'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
+      ),
+      args: ['-NoProfile', '-NonInteractive', '-Command', `Start-Process $Env:${WIN_BROWSER_URL_ENV}`],
+      env: { [WIN_BROWSER_URL_ENV]: url },
     };
   }
 
@@ -105,16 +120,20 @@ export function browserCommandFor(platform, url) {
 /**
  * Opens `url` in the default browser, best-effort.
  *
- * Exit codes are deliberately ignored: explorer.exe reports a non-zero status even
- * when it succeeds, and xdg-open returns 0 as soon as it hands off, so neither can
- * confirm a browser actually opened. The URL printed by runOauthFlow is what
- * guarantees the user can complete the login.
+ * Exit codes are deliberately ignored: the launchers report success/handoff before
+ * a browser is confirmed open, so none can prove one appeared. The URL printed by
+ * runOauthFlow is what guarantees the user can complete the login.
  */
 export function openUrl(url) {
   parseHttpUrl(url, 'authorization URL');
 
-  const { command, args } = browserCommandFor(process.platform, url);
-  const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+  const { command, args, env } = browserCommandFor(process.platform, url);
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: env ? { ...process.env, ...env } : process.env,
+  });
 
   child.on('error', () => {
     console.log('Could not open a browser automatically. Copy the URL above into a browser on this machine.');
