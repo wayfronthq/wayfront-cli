@@ -61,13 +61,13 @@ describe('browserCommandFor', () => {
 
   it('uses PowerShell Start-Process from SystemRoot on windows', () => {
     process.env.SystemRoot = 'D:\\Windows';
-    const { command, args, env } = browserCommandFor('win32', AUTHORIZATION_URL);
+    const { command, args } = browserCommandFor('win32', AUTHORIZATION_URL);
 
     assert.equal(command, 'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-    // The URL is passed through the environment, never on the command line, so it
-    // can never be parsed as PowerShell code.
-    assert.ok(args.includes('Start-Process $Env:WAYFRONT_BROWSER_URL'));
-    assert.equal(env.WAYFRONT_BROWSER_URL, AUTHORIZATION_URL);
+    assert.deepEqual(args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
+    // URL embedded as a single-quoted PowerShell literal (query intact).
+    assert.equal(args[3], `Start-Process '${AUTHORIZATION_URL}'`);
+    assert.ok(args[3].includes('&code_challenge='));
   });
 
   it('falls back to C:\\Windows when SystemRoot is unset', () => {
@@ -79,14 +79,13 @@ describe('browserCommandFor', () => {
     );
   });
 
-  it('never places the url in the windows command arguments', () => {
-    // The whole point of the env-var hand-off: a URL containing shell/PowerShell
-    // metacharacters must not appear in any argument.
-    const hostile = "https://acme.wayfront.com/oauth/authorize?a=1&b='; iex(rm x);'&c=%3B";
-    const { args, env } = browserCommandFor('win32', hostile);
+  it('escapes single quotes so a hostile url cannot break out of the string', () => {
+    // The only character that can escape a PowerShell single-quoted string is a
+    // single quote, closed by doubling it. Everything else ($ ; & ...) is literal.
+    const hostile = "https://acme.wayfront.com/x'; Start-Process calc; '";
+    const command = browserCommandFor('win32', hostile).args[3];
 
-    assert.ok(args.every((arg) => !arg.includes('acme.wayfront.com')));
-    assert.equal(env.WAYFRONT_BROWSER_URL, hostile);
+    assert.equal(command, `Start-Process 'https://acme.wayfront.com/x''; Start-Process calc; '''`);
   });
 
   it('uses open on macos', () => {

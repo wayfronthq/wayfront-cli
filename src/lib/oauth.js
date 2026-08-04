@@ -78,35 +78,31 @@ export function validateOAuthMetadata(metadata, issuerOrigin) {
   return metadata;
 }
 
-// Environment variable used to hand the URL to PowerShell's Start-Process without
-// ever placing it on a command line — see browserCommandFor.
-const WIN_BROWSER_URL_ENV = 'WAYFRONT_BROWSER_URL';
-
 /**
  * Builds the command used to hand a URL to the platform's default browser, as
- * `{ command, args, env }` so the caller can spawn it without a shell.
+ * `{ command, args }` so the caller can spawn it without a shell.
  *
  * No shell is used on any platform: cmd.exe ignores single quotes and treats `&`
  * as a command separator, so any shell-interpolated form truncates OAuth URLs at
  * their first query parameter (the original bug).
  *
- * Windows uses PowerShell's `Start-Process`, reading the URL from an environment
- * variable rather than an argument. `explorer.exe <url>` is unreliable — on some
- * configurations it opens a File Explorer window instead of the browser — and
- * `rundll32 url.dll,FileProtocolHandler` is commonly blocked by endpoint
- * protection as a LOLBin technique. Passing the URL through the environment keeps
- * it out of the PowerShell command text entirely, so it can never be parsed as
- * code regardless of what characters it contains.
+ * Windows uses PowerShell's `Start-Process`. `explorer.exe <url>` is unreliable —
+ * on some configurations it opens a File Explorer window instead of the browser —
+ * and `rundll32 url.dll,FileProtocolHandler` is commonly blocked by endpoint
+ * protection as a LOLBin technique. The URL is embedded as a PowerShell
+ * single-quoted string with any `'` doubled: inside single quotes PowerShell
+ * interprets nothing except `''`, so no character in the URL can be parsed as
+ * code (`&`, `$`, `;`, etc. are all literal).
  */
 export function browserCommandFor(platform, url) {
   if (platform === 'win32') {
+    const quoted = `'${url.replace(/'/g, "''")}'`;
     return {
       command: win32Path.join(
         process.env.SystemRoot || 'C:\\Windows',
         'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
       ),
-      args: ['-NoProfile', '-NonInteractive', '-Command', `Start-Process $Env:${WIN_BROWSER_URL_ENV}`],
-      env: { [WIN_BROWSER_URL_ENV]: url },
+      args: ['-NoProfile', '-NonInteractive', '-Command', `Start-Process ${quoted}`],
     };
   }
 
@@ -127,13 +123,8 @@ export function browserCommandFor(platform, url) {
 export function openUrl(url) {
   parseHttpUrl(url, 'authorization URL');
 
-  const { command, args, env } = browserCommandFor(process.platform, url);
-  const child = spawn(command, args, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    env: env ? { ...process.env, ...env } : process.env,
-  });
+  const { command, args } = browserCommandFor(process.platform, url);
+  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
 
   child.on('error', () => {
     console.log('Could not open a browser automatically. Copy the URL above into a browser on this machine.');
