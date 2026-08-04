@@ -59,15 +59,13 @@ describe('browserCommandFor', () => {
     }
   });
 
-  it('uses PowerShell Start-Process from SystemRoot on windows', () => {
+  it('uses rundll32 from SystemRoot on windows', () => {
     process.env.SystemRoot = 'D:\\Windows';
-    const { command, args } = browserCommandFor('win32', AUTHORIZATION_URL);
 
-    assert.equal(command, 'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-    assert.deepEqual(args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
-    // URL embedded as a single-quoted PowerShell literal (query intact).
-    assert.equal(args[3], `Start-Process '${AUTHORIZATION_URL}'`);
-    assert.ok(args[3].includes('&code_challenge='));
+    assert.deepEqual(browserCommandFor('win32', AUTHORIZATION_URL), {
+      command: 'D:\\Windows\\System32\\rundll32.exe',
+      args: ['url.dll,FileProtocolHandler', AUTHORIZATION_URL],
+    });
   });
 
   it('falls back to C:\\Windows when SystemRoot is unset', () => {
@@ -75,17 +73,18 @@ describe('browserCommandFor', () => {
 
     assert.equal(
       browserCommandFor('win32', AUTHORIZATION_URL).command,
-      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      'C:\\Windows\\System32\\rundll32.exe',
     );
   });
 
-  it('escapes single quotes so a hostile url cannot break out of the string', () => {
-    // The only character that can escape a PowerShell single-quoted string is a
-    // single quote, closed by doubling it. Everything else ($ ; & ...) is literal.
-    const hostile = "https://acme.wayfront.com/x'; Start-Process calc; '";
-    const command = browserCommandFor('win32', hostile).args[3];
+  it('passes the windows url as a single verbatim argument', () => {
+    // No shell is involved, so the URL — including & and any other metacharacter —
+    // is one argv element and cannot be split or reinterpreted.
+    const hostile = "https://acme.wayfront.com/oauth/authorize?a=1&b='; id;'&c=%3Bwhoami";
+    const { args } = browserCommandFor('win32', hostile);
 
-    assert.equal(command, `Start-Process 'https://acme.wayfront.com/x''; Start-Process calc; '''`);
+    assert.equal(args.length, 2);
+    assert.equal(args[1], hostile);
   });
 
   it('uses open on macos', () => {

@@ -80,29 +80,24 @@ export function validateOAuthMetadata(metadata, issuerOrigin) {
 
 /**
  * Builds the command used to hand a URL to the platform's default browser, as
- * `{ command, args }` so the caller can spawn it without a shell.
+ * `{ command, args }` so the caller can spawn it without a shell. The URL is passed
+ * as a single argument, so `&` and other metacharacters can never be reinterpreted
+ * — cmd.exe splitting a shell-interpolated URL at its first `&` was the original bug.
  *
- * No shell is used on any platform: cmd.exe ignores single quotes and treats `&`
- * as a command separator, so any shell-interpolated form truncates OAuth URLs at
- * their first query parameter (the original bug).
- *
- * Windows uses PowerShell's `Start-Process`. `explorer.exe <url>` is unreliable —
- * on some configurations it opens a File Explorer window instead of the browser —
- * and `rundll32 url.dll,FileProtocolHandler` is commonly blocked by endpoint
- * protection as a LOLBin technique. The URL is embedded as a PowerShell
- * single-quoted string with any `'` doubled: inside single quotes PowerShell
- * interprets nothing except `''`, so no character in the URL can be parsed as
- * code (`&`, `$`, `;`, etc. are all literal).
+ * Windows uses `rundll32 url.dll,FileProtocolHandler`. The alternatives were ruled
+ * out by testing on Windows 11: `explorer.exe <url>` opens a File Explorer window
+ * instead of the browser on some configurations, and PowerShell's `Start-Process`
+ * silently does nothing when spawned detached with a hidden window (the options
+ * needed to avoid flashing a console). rundll32 launches reliably under those
+ * options. Endpoint protection may flag rundll32 as a LOLBin on hardened fleets;
+ * the URL that runOauthFlow always prints is the fallback for that case. openUrl
+ * validates the scheme first, so only http(s) URLs ever reach the handler.
  */
 export function browserCommandFor(platform, url) {
   if (platform === 'win32') {
-    const quoted = `'${url.replace(/'/g, "''")}'`;
     return {
-      command: win32Path.join(
-        process.env.SystemRoot || 'C:\\Windows',
-        'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe',
-      ),
-      args: ['-NoProfile', '-NonInteractive', '-Command', `Start-Process ${quoted}`],
+      command: win32Path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'rundll32.exe'),
+      args: ['url.dll,FileProtocolHandler', url],
     };
   }
 
@@ -124,7 +119,7 @@ export function openUrl(url) {
   parseHttpUrl(url, 'authorization URL');
 
   const { command, args } = browserCommandFor(process.platform, url);
-  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' });
 
   child.on('error', () => {
     console.log('Could not open a browser automatically. Copy the URL above into a browser on this machine.');
