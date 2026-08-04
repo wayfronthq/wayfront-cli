@@ -1,16 +1,33 @@
-import { join, relative, sep } from 'node:path';
+import { posix, join } from 'node:path';
 import { readdirSync } from 'node:fs';
 import chalk from 'chalk';
 
+// Template names map to a stable, forward-slash path regardless of platform:
+// the mapping is a logical namespace, not an OS path, and Node's fs accepts `/`
+// on Windows. Using the native path separator here produced backslash paths on
+// Windows that broke the dot-notation round-trip.
+function toPosix(p) {
+  return p.replace(/\\/g, '/');
+}
+
 export function nameToPath(name, dir = './templates') {
   const parts = name.split('.');
-  return join(dir, ...parts) + '.twig';
+  return posix.join(toPosix(dir), ...parts) + '.twig';
 }
 
 export function pathToName(filePath, dir = './templates') {
-  let rel = relative(dir, filePath);
-  if (rel.endsWith('.twig')) rel = rel.slice(0, -5);
-  return rel.split(sep).join('.');
+  let rel = toPosix(filePath).replace(/^\.\//, '').replace(/\/+$/, '');
+  const base = toPosix(dir).replace(/^\.\//, '').replace(/\/+$/, '');
+
+  if (base && (rel === base || rel.startsWith(`${base}/`))) {
+    rel = rel.slice(base.length).replace(/^\/+/, '');
+  }
+
+  if (rel.endsWith('.twig')) {
+    rel = rel.slice(0, -5);
+  }
+
+  return rel.split('/').join('.');
 }
 
 export function formatName(name) {

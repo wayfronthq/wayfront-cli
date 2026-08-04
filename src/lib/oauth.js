@@ -1,8 +1,17 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { win32 as win32Path } from 'node:path';
+
+const require = createRequire(import.meta.url);
+const { version: CLI_VERSION } = require('../../package.json');
 
 export const DEFAULT_OAUTH_SCOPE = 'cli';
+export const DEFAULT_CALLBACK_TIMEOUT_MS = 300000;
+const CALLBACK_PATH = '/callback';
+const REQUIRED_ENDPOINTS = ['authorization_endpoint', 'token_endpoint'];
+const OPTIONAL_ENDPOINTS = ['registration_endpoint'];
 
 function toBase64Url(buffer) {
   return buffer.toString('base64')
@@ -19,11 +28,106 @@ export function generateCodeChallenge(verifier) {
   return toBase64Url(createHash('sha256').update(verifier).digest());
 }
 
+function parseHttpUrl(value, label) {
+  let parsed;
+
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`Workspace returned an unparseable ${label}: ${value}`);
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Refusing to use a non-HTTP ${label} (${parsed.protocol}) returned by the workspace: ${value}`);
+  }
+
+  return parsed;
+}
+
+/**
+ * The OAuth metadata document is fetched from the workspace, so every endpoint in
+ * it is remote-controlled input. Requiring each endpoint to share the origin that
+ * served the document stops a hostile or misconfigured workspace from pointing the
+ * token/registration POSTs — which carry the authorization code and PKCE verifier —
+ * at an unrelated host such as a cloud metadata service or a loopback port.
+ */
+export function validateOAuthMetadata(metadata, issuerOrigin) {
+  const expectedOrigin = new URL(issuerOrigin).origin;
+
+  for (const field of [...REQUIRED_ENDPOINTS, ...OPTIONAL_ENDPOINTS]) {
+    const value = metadata?.[field];
+
+    if (value === undefined || value === null) {
+      if (OPTIONAL_ENDPOINTS.includes(field)) {
+        continue;
+      }
+
+      throw new Error(`Workspace OAuth metadata is missing ${field}.`);
+    }
+
+    const endpoint = parseHttpUrl(value, field);
+
+    if (endpoint.origin !== expectedOrigin) {
+      throw new Error(
+        `Workspace OAuth metadata points ${field} at ${endpoint.origin}, which is not the workspace origin `
+        + `(${expectedOrigin}). Refusing to continue.`,
+      );
+    }
+  }
+
+  return metadata;
+}
+
+/**
+ * Builds the command used to hand a URL to the platform's default browser, as
+ * `{ command, args }` so the caller can spawn it without a shell. The URL is passed
+ * as a single argument, so `&` and other metacharacters can never be reinterpreted
+ * — cmd.exe splitting a shell-interpolated URL at its first `&` was the original bug.
+ *
+ * Windows uses `rundll32 url.dll,FileProtocolHandler`. The alternatives were ruled
+ * out by testing on Windows 11: `explorer.exe <url>` opens a File Explorer window
+ * instead of the browser on some configurations, and PowerShell's `Start-Process`
+ * silently does nothing when spawned detached with a hidden window (the options
+ * needed to avoid flashing a console). rundll32 launches reliably under those
+ * options. Endpoint protection may flag rundll32 as a LOLBin on hardened fleets;
+ * the URL that runOauthFlow always prints is the fallback for that case. openUrl
+ * validates the scheme first, so only http(s) URLs ever reach the handler.
+ */
+export function browserCommandFor(platform, url) {
+  if (platform === 'win32') {
+    return {
+      command: win32Path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'rundll32.exe'),
+      args: ['url.dll,FileProtocolHandler', url],
+    };
+  }
+
+  if (platform === 'darwin') {
+    return { command: 'open', args: [url] };
+  }
+
+  return { command: 'xdg-open', args: [url] };
+}
+
+/**
+ * Opens `url` in the default browser, best-effort.
+ *
+ * Exit codes are deliberately ignored: the launchers report success/handoff before
+ * a browser is confirmed open, so none can prove one appeared. The URL printed by
+ * runOauthFlow is what guarantees the user can complete the login.
+ */
 export function openUrl(url) {
-  const cmd = process.platform === 'darwin' ? 'open'
-    : process.platform === 'win32' ? 'start'
-    : 'xdg-open';
-  exec(`${cmd} '${url}'`);
+  parseHttpUrl(url, 'authorization URL');
+
+  const { command, args } = browserCommandFor(process.platform, url);
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+
+  child.on('error', () => {
+    console.log('Could not open a browser automatically. Copy the URL above into a browser on this machine.');
+  });
+
+  child.unref();
+
+  return child;
 }
 
 export async function discoverOAuthMetadata(baseUrl) {
@@ -35,7 +139,24 @@ export async function discoverOAuthMetadata(baseUrl) {
     throw new Error(`Could not discover OAuth metadata for ${baseUrl}`);
   }
 
-  return response.json();
+  // Validate against the requested workspace origin, not the post-redirect
+  // response.url: fetch follows redirects, so trusting where we ended up would let
+  // an open redirect or hijacked discovery response send the code/PKCE POSTs to an
+  // attacker origin that trivially matches its own metadata. Reject a cross-origin
+  // discovery redirect outright — a legitimate canonical host would need an
+  // explicit allowlist, not "wherever we landed".
+  const requestedOrigin = new URL(baseUrl).origin;
+
+  if (response.url && new URL(response.url).origin !== requestedOrigin) {
+    throw new Error(
+      `OAuth discovery for ${requestedOrigin} was redirected to ${new URL(response.url).origin}. `
+      + 'Refusing to continue.',
+    );
+  }
+
+  const metadata = await response.json();
+
+  return validateOAuthMetadata(metadata, requestedOrigin);
 }
 
 export async function registerOauthClient(metadata, redirectUri, scope = DEFAULT_OAUTH_SCOPE) {
@@ -126,83 +247,112 @@ export async function refreshAccessToken(auth) {
   return response.json();
 }
 
-function startCallbackServer({ state, timeoutMs = 120000 }) {
+function respond(res, status, heading, body) {
+  // Connection: close so the browser does not keep the socket alive; server.close()
+  // can then complete on its own once this response has flushed.
+  res.writeHead(status, { 'Content-Type': 'text/html', Connection: 'close' });
+  res.end(`<h1>${heading}</h1><p>${body}</p>`);
+}
+
+export function startCallbackServer({ state, timeoutMs = DEFAULT_CALLBACK_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
+    // Set once waitForCode() is called. Until then the server is already listening
+    // (the OAuth client still has to be registered), so anything that arrives is a
+    // stray request and must not be mistaken for — or allowed to pre-empt — the
+    // real callback.
+    let handleCallback = null;
+    // Routes a post-listen 'error' into whichever promise is currently in flight.
+    // Set immediately on listen so there is never a window without an 'error'
+    // listener — an unhandled 'error' event would otherwise crash the process
+    // during the registerOauthClient round-trip that precedes waitForCode().
+    let handleServerError = reject;
+
     const server = createServer((req, res) => {
-      const url = new URL(req.url, 'http://127.0.0.1');
-      const returnedState = url.searchParams.get('state');
-      const code = url.searchParams.get('code');
-      const error = url.searchParams.get('error');
+      const { pathname } = new URL(req.url, 'http://127.0.0.1');
 
-      if (error) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end('<h1>Wayfront CLI login failed</h1><p>You can close this window.</p>');
-        server.close();
-        reject(new Error(`OAuth authorization failed: ${error}`));
+      if (pathname !== CALLBACK_PATH || !handleCallback) {
+        res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
+        res.end('Not found');
         return;
       }
 
-      if (!code || returnedState !== state) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end('<h1>Wayfront CLI login failed</h1><p>State mismatch. You can close this window.</p>');
-        server.close();
-        reject(new Error('OAuth callback state mismatch.'));
-        return;
-      }
-
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<h1>Wayfront CLI connected</h1><p>You can close this window and return to your terminal.</p>');
-      server.close();
-      resolve(code);
+      handleCallback(req, res);
     });
+
+    server.on('error', (error) => handleServerError(error));
 
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
+
+      // Listening succeeded, so a later error is no longer a startup failure.
+      // Until waitForCode() runs there is nothing to reject, so drop it; the
+      // stray-request handler already ignores non-callback traffic.
+      handleServerError = () => {};
+
       resolve({
         port,
         waitForCode: () => new Promise((resolveCode, rejectCode) => {
           const timer = setTimeout(() => {
-            server.close();
-            rejectCode(new Error('Timed out waiting for OAuth callback.'));
+            settle(rejectCode, new Error(
+              `Timed out waiting for OAuth callback (Wayfront CLI v${CLI_VERSION}). `
+              + 'Re-run `wayfront auth login` to try again.',
+            ));
           }, timeoutMs);
 
-          server.removeAllListeners('request');
-          server.on('request', (req, res) => {
+          const settle = (settleWith, value) => {
+            handleCallback = null;
+            handleServerError = () => {};
+            clearTimeout(timer);
+            // Graceful close: stop accepting new connections and let any in-flight
+            // response finish flushing. Connection: close means the browser socket
+            // closes on its own, so this resolves without truncating the page.
+            server.close();
+            settleWith(value);
+          };
+
+          handleServerError = (error) => settle(rejectCode, error);
+
+          handleCallback = (req, res) => {
             const url = new URL(req.url, 'http://127.0.0.1');
             const returnedState = url.searchParams.get('state');
             const code = url.searchParams.get('code');
             const error = url.searchParams.get('error');
 
             if (error) {
-              clearTimeout(timer);
-              res.writeHead(400, { 'Content-Type': 'text/html' });
-              res.end('<h1>Wayfront CLI login failed</h1><p>You can close this window.</p>');
-              server.close();
-              rejectCode(new Error(`OAuth authorization failed: ${error}`));
+              respond(res, 400, 'Wayfront CLI login failed', 'You can close this window.');
+              settle(rejectCode, new Error(`OAuth authorization failed: ${error}`));
               return;
             }
 
             if (!code || returnedState !== state) {
-              clearTimeout(timer);
-              res.writeHead(400, { 'Content-Type': 'text/html' });
-              res.end('<h1>Wayfront CLI login failed</h1><p>State mismatch. You can close this window.</p>');
-              server.close();
-              rejectCode(new Error('OAuth callback state mismatch.'));
+              respond(res, 400, 'Wayfront CLI login failed', 'State mismatch. You can close this window.');
+              settle(rejectCode, new Error('OAuth callback state mismatch.'));
               return;
             }
 
-            clearTimeout(timer);
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end('<h1>Wayfront CLI connected</h1><p>You can close this window and return to your terminal.</p>');
-            server.close();
-            resolveCode(code);
-          });
+            respond(res, 200, 'Wayfront CLI connected', 'You can close this window and return to your terminal.');
+            settle(resolveCode, code);
+          };
         }),
       });
     });
-
-    server.on('error', reject);
   });
+}
+
+/**
+ * Printed before the browser is launched so the login never depends on the launch
+ * succeeding — the URL is unstyled and alone on its line to survive copy/paste out
+ * of terminals that hard-wrap long lines.
+ */
+function printAuthorizationUrl(authorizationUrl) {
+  console.log(`Wayfront CLI v${CLI_VERSION}`);
+  console.log('');
+  console.log('Open this URL in your browser to sign in:');
+  console.log('');
+  console.log(authorizationUrl);
+  console.log('');
+  console.log('The browser must be on this machine - the CLI is listening on 127.0.0.1.');
+  console.log('Waiting for authorization... (Ctrl+C to cancel)');
 }
 
 export async function runOauthFlow(baseUrl) {
@@ -212,7 +362,7 @@ export async function runOauthFlow(baseUrl) {
   const verifier = generateCodeVerifier();
   const challenge = generateCodeChallenge(verifier);
   const callback = await startCallbackServer({ state });
-  const redirectUri = `http://127.0.0.1:${callback.port}/callback`;
+  const redirectUri = `http://127.0.0.1:${callback.port}${CALLBACK_PATH}`;
   const client = await registerOauthClient(metadata, redirectUri, scope);
   const authorizationUrl = buildAuthorizationUrl({
     metadata,
@@ -223,7 +373,9 @@ export async function runOauthFlow(baseUrl) {
     scope,
   });
 
+  printAuthorizationUrl(authorizationUrl);
   openUrl(authorizationUrl);
+
   const code = await callback.waitForCode();
   const token = await exchangeAuthorizationCode({
     metadata,
