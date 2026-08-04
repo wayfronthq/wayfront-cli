@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { parseWorkspaceInput } from './workspace-input.js';
@@ -57,8 +57,18 @@ export function loadConfig() {
 }
 
 export function saveConfig(config) {
-  mkdirSync(getConfigDir(), { recursive: true });
-  writeFileSync(getConfigPath(), JSON.stringify(normalizeConfig(config), null, 2) + '\n');
+  // The config file holds access and refresh tokens, so keep it owner-only.
+  mkdirSync(getConfigDir(), { recursive: true, mode: 0o700 });
+  const path = getConfigPath();
+  writeFileSync(path, JSON.stringify(normalizeConfig(config), null, 2) + '\n', { mode: 0o600 });
+
+  // writeFileSync's mode only applies when it creates the file; tighten an existing
+  // one too. Best-effort — Windows uses a different permission model.
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // ignore
+  }
 }
 
 export function getWorkspaceConfig(config = loadConfig(), workspaceName = null) {
