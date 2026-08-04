@@ -40,6 +40,18 @@ describe('nameToPath — names with hyphens', () => {
   });
 });
 
+describe('pathToName — Windows separators', () => {
+  // findTemplateFiles builds paths with the native separator, so on Windows
+  // pathToName receives backslash paths. It must still map to dot-notation.
+  it('accepts backslash-separated paths', () => {
+    assert.equal(pathToName('templates\\portal\\invoices\\show.twig'), 'portal.invoices.show');
+  });
+
+  it('accepts backslash paths with a custom dir', () => {
+    assert.equal(pathToName('custom\\portal\\index.twig', './custom'), 'portal.index');
+  });
+});
+
 describe('roundtrip', () => {
   const names = ['portal.invoices.show', 'layout', 'custom.email.header', 'portal.index', 'contact-forms.show', 'invoices._invoice'];
 
