@@ -11,7 +11,8 @@ export const DEFAULT_OAUTH_SCOPE = 'cli';
 export const DEFAULT_CALLBACK_TIMEOUT_MS = 300000;
 const CALLBACK_PATH = '/callback';
 const REQUIRED_ENDPOINTS = ['authorization_endpoint', 'token_endpoint'];
-const OPTIONAL_ENDPOINTS = ['registration_endpoint'];
+const OPTIONAL_ENDPOINTS = ['registration_endpoint', 'revocation_endpoint'];
+const REVOCATION_TIMEOUT_MS = 5000;
 
 function toBase64Url(buffer) {
   return buffer.toString('base64')
@@ -53,6 +54,19 @@ function parseHttpUrl(value, label) {
  */
 export function validateOAuthMetadata(metadata, issuerOrigin) {
   const expectedOrigin = new URL(issuerOrigin).origin;
+
+  // RFC 8414: the metadata must carry an issuer identifier, and it must match the
+  // origin the document was discovered from — this binds the whole document to the
+  // workspace and defends against authorization-server mix-up.
+  if (!metadata?.issuer) {
+    throw new Error('Workspace OAuth metadata is missing the issuer.');
+  }
+  if (parseHttpUrl(metadata.issuer, 'issuer').origin !== expectedOrigin) {
+    throw new Error(
+      `Workspace OAuth issuer ${metadata.issuer} does not match the workspace origin (${expectedOrigin}). `
+      + 'Refusing to continue.',
+    );
+  }
 
   for (const field of [...REQUIRED_ENDPOINTS, ...OPTIONAL_ENDPOINTS]) {
     const value = metadata?.[field];
@@ -247,6 +261,45 @@ export async function refreshAccessToken(auth) {
   return response.json();
 }
 
+/**
+ * Best-effort RFC 7009 token revocation, used on logout so the server-side session
+ * dies rather than only the local copy. Revokes the refresh token (which cascades
+ * to its access tokens). Returns whether the server confirmed revocation; never
+ * throws and is a no-op unless the workspace advertised a revocation endpoint, so
+ * logout stays fast and works offline.
+ */
+export async function revokeToken(auth) {
+  const token = auth?.refreshToken || auth?.accessToken;
+  if (!auth?.revocationEndpoint || !token) {
+    return false;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REVOCATION_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(auth.revocationEndpoint, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        token,
+        token_type_hint: auth.refreshToken ? 'refresh_token' : 'access_token',
+        client_id: auth.clientId,
+      }),
+      signal: controller.signal,
+    });
+
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function respond(res, status, heading, body) {
   // Connection: close so the browser does not keep the socket alive; server.close()
   // can then complete on its own once this response has flushed.
@@ -394,6 +447,7 @@ export async function runOauthFlow(baseUrl) {
     tokenEndpoint: metadata.token_endpoint,
     authorizationEndpoint: metadata.authorization_endpoint,
     registrationEndpoint: metadata.registration_endpoint,
+    revocationEndpoint: metadata.revocation_endpoint || null,
     scope,
   };
 }

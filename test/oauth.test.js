@@ -6,6 +6,7 @@ import {
   DEFAULT_OAUTH_SCOPE,
   discoverOAuthMetadata,
   openUrl,
+  revokeToken,
   startCallbackServer,
   validateOAuthMetadata,
 } from '../src/lib/oauth.js';
@@ -22,6 +23,7 @@ const AUTHORIZATION_URL = buildAuthorizationUrl({
 
 function metadataFor(origin, overrides = {}) {
   return {
+    issuer: origin,
     authorization_endpoint: `${origin}/oauth/authorize`,
     token_endpoint: `${origin}/oauth/token`,
     registration_endpoint: `${origin}/oauth/register`,
@@ -307,5 +309,74 @@ describe('discoverOAuthMetadata', () => {
       discoverOAuthMetadata('https://acme.wayfront.com'),
       /redirected to https:\/\/evil\.example/,
     );
+  });
+});
+
+describe('validateOAuthMetadata issuer (RFC 8414)', () => {
+  const origin = 'https://acme.wayfront.com';
+
+  it('accepts an issuer matching the workspace origin (trailing slash ok)', () => {
+    assert.doesNotThrow(() => validateOAuthMetadata(metadataFor(origin, { issuer: `${origin}/` }), origin));
+  });
+
+  it('rejects a missing issuer', () => {
+    assert.throws(() => validateOAuthMetadata(metadataFor(origin, { issuer: undefined }), origin), /missing the issuer/);
+  });
+
+  it('rejects an issuer from a different origin', () => {
+    assert.throws(
+      () => validateOAuthMetadata(metadataFor(origin, { issuer: 'https://evil.example' }), origin),
+      /issuer .* does not match the workspace origin/,
+    );
+  });
+
+  it('validates the revocation endpoint origin when present', () => {
+    assert.doesNotThrow(() => validateOAuthMetadata(metadataFor(origin, { revocation_endpoint: `${origin}/oauth/revoke` }), origin));
+    assert.throws(
+      () => validateOAuthMetadata(metadataFor(origin, { revocation_endpoint: 'https://evil.example/revoke' }), origin),
+      /points revocation_endpoint at/,
+    );
+  });
+});
+
+describe('revokeToken', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('is a no-op without a revocation endpoint', async () => {
+    let called = false;
+    global.fetch = async () => { called = true; return { ok: true }; };
+
+    assert.equal(await revokeToken({ refreshToken: 'r', clientId: 'c' }), false);
+    assert.equal(called, false);
+  });
+
+  it('posts the refresh token to the revocation endpoint', async () => {
+    let seen;
+    global.fetch = async (url, options) => {
+      seen = { url, body: options.body.toString() };
+      return { ok: true };
+    };
+
+    const ok = await revokeToken({
+      revocationEndpoint: 'https://acme.wayfront.com/oauth/revoke',
+      refreshToken: 'refresh-1',
+      clientId: 'client-1',
+    });
+
+    assert.equal(ok, true);
+    assert.equal(seen.url, 'https://acme.wayfront.com/oauth/revoke');
+    assert.match(seen.body, /token=refresh-1/);
+    assert.match(seen.body, /token_type_hint=refresh_token/);
+    assert.match(seen.body, /client_id=client-1/);
+  });
+
+  it('never throws when revocation fails', async () => {
+    global.fetch = async () => { throw new Error('network down'); };
+
+    assert.equal(await revokeToken({ revocationEndpoint: 'https://acme.wayfront.com/oauth/revoke', accessToken: 'a', clientId: 'c' }), false);
   });
 });

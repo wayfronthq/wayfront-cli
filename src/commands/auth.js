@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import { loadConfig, saveConfig, getWorkspaceConfig } from '../lib/config.js';
-import { runOauthFlow } from '../lib/oauth.js';
+import { runOauthFlow, revokeToken } from '../lib/oauth.js';
 import { prompt } from '../lib/prompt.js';
 import { promptForWorkspaceInput, parseWorkspaceInput } from '../lib/workspace-input.js';
 
@@ -80,9 +80,16 @@ export function runStatus() {
   console.log(`Auth: ${authType}`);
 }
 
-export function runLogout(workspaceName = null) {
+export async function runLogout(workspaceName = null) {
   const config = loadConfig();
   const workspace = getWorkspaceConfig(config, workspaceName);
+
+  // Best-effort server-side revocation before dropping the local copy, so the
+  // token can't be reused if it leaked. No-op unless the workspace advertised a
+  // revocation endpoint; never blocks logout.
+  if (workspace.auth?.type === 'oauth') {
+    await revokeToken(workspace.auth);
+  }
 
   config.workspaces[workspace.workspace] = {
     ...config.workspaces[workspace.workspace],
@@ -138,9 +145,9 @@ export function registerAuth(program) {
   auth
     .command('logout [workspace]')
     .description('Remove the saved auth session for a workspace')
-    .action((workspace) => {
+    .action(async (workspace) => {
       try {
-        runLogout(workspace);
+        await runLogout(workspace);
       } catch (error) {
         console.error(error.message);
         process.exit(1);
