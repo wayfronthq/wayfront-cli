@@ -4,6 +4,7 @@ import {
   browserCommandFor,
   buildAuthorizationUrl,
   DEFAULT_OAUTH_SCOPE,
+  discoverOAuthMetadata,
   openUrl,
   startCallbackServer,
   validateOAuthMetadata,
@@ -206,6 +207,9 @@ describe('callback server', () => {
     const response = await get(callback.port, `/callback?code=the-code&state=${STATE}`);
 
     assert.equal(response.status, 200);
+    // The response body must arrive intact — the shutdown must not sever the
+    // socket before the success page flushes.
+    assert.match(await response.text(), /Wayfront CLI connected/);
     assert.equal(await pending, 'the-code');
   });
 
@@ -254,5 +258,42 @@ describe('callback server', () => {
     const callback = await startCallbackServer({ state: STATE, timeoutMs: 50 });
 
     await assert.rejects(callback.waitForCode(), /Timed out waiting for OAuth callback.*wayfront auth login/s);
+  });
+});
+
+describe('discoverOAuthMetadata', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  function fakeResponse({ url, body }) {
+    return { ok: true, url, json: async () => body };
+  }
+
+  it('validates metadata against the requested origin', async () => {
+    const origin = 'https://acme.wayfront.com';
+    global.fetch = async () => fakeResponse({ url: `${origin}/.well-known/oauth-authorization-server`, body: metadataFor(origin) });
+
+    const metadata = await discoverOAuthMetadata(origin);
+
+    assert.equal(metadata.token_endpoint, `${origin}/oauth/token`);
+  });
+
+  it('rejects a cross-origin discovery redirect even if the metadata is self-consistent', async () => {
+    // fetch follows the redirect; the attacker's document validates against the
+    // attacker's own origin, so anchoring to response.url would pass. Anchoring to
+    // the requested origin must catch it.
+    const evil = 'https://evil.example';
+    global.fetch = async () => fakeResponse({
+      url: `${evil}/.well-known/oauth-authorization-server`,
+      body: metadataFor(evil),
+    });
+
+    await assert.rejects(
+      discoverOAuthMetadata('https://acme.wayfront.com'),
+      /redirected to https:\/\/evil\.example/,
+    );
   });
 });

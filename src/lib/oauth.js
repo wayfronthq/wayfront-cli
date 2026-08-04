@@ -134,13 +134,24 @@ export async function discoverOAuthMetadata(baseUrl) {
     throw new Error(`Could not discover OAuth metadata for ${baseUrl}`);
   }
 
+  // Validate against the requested workspace origin, not the post-redirect
+  // response.url: fetch follows redirects, so trusting where we ended up would let
+  // an open redirect or hijacked discovery response send the code/PKCE POSTs to an
+  // attacker origin that trivially matches its own metadata. Reject a cross-origin
+  // discovery redirect outright — a legitimate canonical host would need an
+  // explicit allowlist, not "wherever we landed".
+  const requestedOrigin = new URL(baseUrl).origin;
+
+  if (response.url && new URL(response.url).origin !== requestedOrigin) {
+    throw new Error(
+      `OAuth discovery for ${requestedOrigin} was redirected to ${new URL(response.url).origin}. `
+      + 'Refusing to continue.',
+    );
+  }
+
   const metadata = await response.json();
 
-  // Validate against the URL that actually served the document rather than the
-  // requested one: a workspace reachable on more than one domain may redirect to
-  // its canonical host, and the origin that served the metadata is the one whose
-  // endpoints we are being asked to trust.
-  return validateOAuthMetadata(metadata, response.url || baseUrl);
+  return validateOAuthMetadata(metadata, requestedOrigin);
 }
 
 export async function registerOauthClient(metadata, redirectUri, scope = DEFAULT_OAUTH_SCOPE) {
@@ -232,15 +243,10 @@ export async function refreshAccessToken(auth) {
 }
 
 function respond(res, status, heading, body) {
-  res.writeHead(status, { 'Content-Type': 'text/html' });
+  // Connection: close so the browser does not keep the socket alive; server.close()
+  // can then complete on its own once this response has flushed.
+  res.writeHead(status, { 'Content-Type': 'text/html', Connection: 'close' });
   res.end(`<h1>${heading}</h1><p>${body}</p>`);
-}
-
-function shutdown(server) {
-  server.close();
-  // The browser holds the callback connection open with keep-alive, which would
-  // otherwise keep the CLI alive for the server's idle timeout after login.
-  server.closeAllConnections?.();
 }
 
 export function startCallbackServer({ state, timeoutMs = DEFAULT_CALLBACK_TIMEOUT_MS }) {
@@ -250,12 +256,17 @@ export function startCallbackServer({ state, timeoutMs = DEFAULT_CALLBACK_TIMEOU
     // stray request and must not be mistaken for — or allowed to pre-empt — the
     // real callback.
     let handleCallback = null;
+    // Routes a post-listen 'error' into whichever promise is currently in flight.
+    // Set immediately on listen so there is never a window without an 'error'
+    // listener — an unhandled 'error' event would otherwise crash the process
+    // during the registerOauthClient round-trip that precedes waitForCode().
+    let handleServerError = reject;
 
     const server = createServer((req, res) => {
       const { pathname } = new URL(req.url, 'http://127.0.0.1');
 
       if (pathname !== CALLBACK_PATH || !handleCallback) {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
         res.end('Not found');
         return;
       }
@@ -263,32 +274,38 @@ export function startCallbackServer({ state, timeoutMs = DEFAULT_CALLBACK_TIMEOU
       handleCallback(req, res);
     });
 
-    server.once('error', reject);
+    server.on('error', (error) => handleServerError(error));
 
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
 
-      // Listening succeeded, so a later error belongs to waitForCode's promise.
-      server.removeListener('error', reject);
+      // Listening succeeded, so a later error is no longer a startup failure.
+      // Until waitForCode() runs there is nothing to reject, so drop it; the
+      // stray-request handler already ignores non-callback traffic.
+      handleServerError = () => {};
 
       resolve({
         port,
         waitForCode: () => new Promise((resolveCode, rejectCode) => {
           const timer = setTimeout(() => {
-            shutdown(server);
-            rejectCode(new Error(
+            settle(rejectCode, new Error(
               `Timed out waiting for OAuth callback (Wayfront CLI v${CLI_VERSION}). `
               + 'Re-run `wayfront auth login` to try again.',
             ));
           }, timeoutMs);
 
           const settle = (settleWith, value) => {
+            handleCallback = null;
+            handleServerError = () => {};
             clearTimeout(timer);
-            shutdown(server);
+            // Graceful close: stop accepting new connections and let any in-flight
+            // response finish flushing. Connection: close means the browser socket
+            // closes on its own, so this resolves without truncating the page.
+            server.close();
             settleWith(value);
           };
 
-          server.once('error', (error) => settle(rejectCode, error));
+          handleServerError = (error) => settle(rejectCode, error);
 
           handleCallback = (req, res) => {
             const url = new URL(req.url, 'http://127.0.0.1');
