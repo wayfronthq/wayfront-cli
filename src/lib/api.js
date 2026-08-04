@@ -30,6 +30,55 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The oauth-api routes sit behind redirecting middleware (expired license, missing
+ * custom-domain permission, session bounce). fetch follows the redirect — dropping
+ * the Authorization header across origins — and lands on an HTML page, so a blind
+ * response.json() would fail with a cryptic "Unexpected token '<'". Turn those into
+ * an actionable ApiError instead.
+ */
+function assertJsonResponse(response, url) {
+  if (response.redirected) {
+    let path = '';
+    try {
+      path = new URL(response.url).pathname;
+    } catch {
+      path = '';
+    }
+
+    if (path === '/expired') {
+      throw new ApiError(
+        "This workspace's license is not active. Reactivate it (or use a workspace with an active license) and try again.",
+        response.status,
+      );
+    }
+
+    throw new ApiError(
+      `The request to ${url} was redirected to ${response.url}. Your workspace or plan may not permit this, `
+      + 'or your session expired — try running wayfront auth login.',
+      response.status,
+    );
+  }
+
+  const contentType = response.headers?.get?.('content-type') || '';
+  if (contentType && !contentType.includes('json')) {
+    throw new ApiError(
+      `Expected a JSON response from ${url} but received "${contentType}" (status ${response.status}).`,
+      response.status,
+    );
+  }
+}
+
+async function readJson(response, url) {
+  assertJsonResponse(response, url);
+
+  try {
+    return await response.json();
+  } catch {
+    throw new ApiError(`Received a non-JSON response from ${url} (status ${response.status}).`, response.status);
+  }
+}
+
 function normalizePath(path, basePath) {
   if (/^https?:\/\//.test(path)) {
     return path;
@@ -124,6 +173,9 @@ export async function apiRequest(method, path, body) {
   }
 
   if (!response.ok) {
+    // A redirect or HTML body must be reported clearly, not parsed as an error object.
+    assertJsonResponse(response, url);
+
     let data;
     try {
       data = await response.json();
@@ -149,7 +201,7 @@ export async function apiRequest(method, path, body) {
 
   if (response.status === 204) return null;
 
-  return response.json();
+  return readJson(response, url);
 }
 
 export function apiGet(path) {
