@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import { loadConfig, saveConfig, getWorkspaceConfig } from '../lib/config.js';
 import { runOauthFlow } from '../lib/oauth.js';
+import { prompt } from '../lib/prompt.js';
 import { promptForWorkspaceInput, parseWorkspaceInput } from '../lib/workspace-input.js';
 
 async function resolveWorkspaceTarget(workspaceInput = null) {
@@ -50,6 +51,25 @@ export async function runLogin(workspaceInput = null) {
   console.log(chalk.green('✓') + ` Signed in to "${target.workspace}" with OAuth`);
 }
 
+export async function runTokenLogin(workspaceInput = null, options = {}) {
+  const target = await resolveWorkspaceTarget(workspaceInput);
+  const token = (options.token || await prompt('API token: ')).trim();
+
+  if (!token) {
+    throw new Error('No token provided.');
+  }
+
+  target.config.workspaces[target.workspace] = {
+    ...target.existing,
+    ...(target.url !== `https://${target.workspace}.wayfront.com` ? { url: target.url } : {}),
+    auth: { type: 'token', token },
+  };
+  target.config.default = target.workspace;
+  saveConfig(target.config);
+
+  console.log(chalk.green('✓') + ` Saved an API token for "${target.workspace}"`);
+}
+
 export function runStatus() {
   const config = loadConfig();
   const workspace = getWorkspaceConfig(config);
@@ -84,6 +104,19 @@ export function registerAuth(program) {
     .action(async (workspace) => {
       try {
         await runLogin(workspace);
+      } catch (error) {
+        console.error(error.message);
+        process.exit(1);
+      }
+    });
+
+  auth
+    .command('token [workspace]')
+    .description('Save an API token for non-interactive or CI use')
+    .option('--token <token>', 'API token (you are prompted if omitted)')
+    .action(async (workspace, options) => {
+      try {
+        await runTokenLogin(workspace, options);
       } catch (error) {
         console.error(error.message);
         process.exit(1);

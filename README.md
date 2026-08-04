@@ -39,6 +39,29 @@ Switch workspaces:
 wayfront workspace use acme
 ```
 
+## Non-interactive / CI authentication
+
+OAuth needs a browser, which CI does not have. Use an API token instead.
+
+Save a token to the config once:
+
+```bash
+wayfront auth token acme --token wf_xxx
+# or omit --token to be prompted
+```
+
+Or authenticate with no config file at all — set two environment variables and the
+CLI uses them for every command:
+
+```bash
+export WAYFRONT_TOKEN=wf_xxx
+export WAYFRONT_WORKSPACE=acme   # a name, domain, or full URL
+wayfront templates pull
+```
+
+`WAYFRONT_TOKEN` takes precedence over any saved credentials, so it is the simplest
+way to run the CLI in a GitHub Actions job or other automation.
+
 ## Resource-first commands
 
 The CLI is organized by resource, similar to `gh`.
@@ -122,6 +145,7 @@ wayfront api call ordersUpdate order=ord_123 --json '{"status":"paid"}'
 ```bash
 wayfront                                 Show connection status and help
 wayfront auth login [workspace]          Sign in with OAuth
+wayfront auth token [workspace]          Save an API token (non-interactive / CI)
 wayfront auth status                     Show the active workspace and auth state
 wayfront auth logout [workspace]         Remove a saved auth session
 wayfront workspace list                  List configured workspaces

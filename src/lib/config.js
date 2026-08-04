@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { parseWorkspaceInput } from './workspace-input.js';
 
 function getDefaultConfigDir() {
   return join(homedir(), '.config', 'wayfront');
@@ -84,7 +85,36 @@ export function getApiBasePath(workspaceConfig) {
   return workspaceConfig?.auth?.type === 'oauth' ? '/oauth-api' : '/api';
 }
 
+/**
+ * Non-interactive auth for CI: when WAYFRONT_TOKEN is set, use it as a token
+ * credential without reading or writing the config file. The workspace comes from
+ * WAYFRONT_WORKSPACE (a name, domain, or URL) or the configured default.
+ */
+export function getEnvTokenCredentials() {
+  const token = process.env.WAYFRONT_TOKEN;
+  if (!token) {
+    return null;
+  }
+
+  const target = process.env.WAYFRONT_WORKSPACE || loadConfig().default;
+  if (!target) {
+    throw new Error('WAYFRONT_TOKEN is set but no workspace is selected. Set WAYFRONT_WORKSPACE to a workspace name or URL.');
+  }
+
+  const parsed = parseWorkspaceInput(target);
+  return {
+    workspace: parsed.workspace,
+    url: parsed.url || `https://${parsed.workspace}.wayfront.com`,
+    auth: { type: 'token', token },
+  };
+}
+
 export function getCredentials() {
+  const envCredentials = getEnvTokenCredentials();
+  if (envCredentials) {
+    return envCredentials;
+  }
+
   const workspaceConfig = getWorkspaceConfig();
 
   if (!workspaceConfig.auth) {
